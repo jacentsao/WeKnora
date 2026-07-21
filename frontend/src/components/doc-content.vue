@@ -971,6 +971,7 @@ const channelLabelMap: Record<string, string> = {
   // "飞书云盘" / "Lark 云盘", distinct from the wiki connector's "飞书".
   feishu_drive: 'knowledgeBase.channelFeishuDrive',
   lark_drive: 'knowledgeBase.channelLarkDrive',
+  confluence: 'knowledgeBase.channelConfluence',
   dingtalk: 'knowledgeBase.channelDingtalk',
   slack: 'knowledgeBase.channelSlack',
   im: 'knowledgeBase.channelIm',
