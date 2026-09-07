@@ -67,6 +67,10 @@ const (
 	// queued downstream tasks, but the knowledge row and any already-written
 	// chunks/index are kept so the user can re-trigger parsing via reparse.
 	ParseStatusCancelled = "cancelled"
+	// ParseStatusSkipped indicates a file that is deliberately stored for
+	// reference only. It has a source resource but must never enter the
+	// document parsing, chunking, or embedding pipeline.
+	ParseStatusSkipped = "skipped"
 )
 
 // Summary status constants for async summary generation

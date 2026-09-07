@@ -28,6 +28,7 @@ import {
   listKnowledgeTags,
   updateKnowledgeTagBatch,
   uploadKnowledgeFile,
+  finalizeFolderUpload,
   createKnowledgeFromURL,
   reparseKnowledge,
   cancelKnowledgeParse,
@@ -62,6 +63,7 @@ import {
 } from './wikiStatusRefresh';
 import { listMoveTargets, moveKnowledge, getKnowledgeMoveProgress } from '@/api/knowledge-base';
 import { resolveKnowledgeDownloadFileName } from './knowledgeDownloadFileName';
+import { getUploadFileExt } from './utils/uploadSources';
 import {
   buildUploadFileName,
   canMoveFolderTo,
@@ -1664,6 +1666,7 @@ const executeUploadBatch = async (
   let failCount = 0;
   const totalCount = files.length;
   const hasFolderPaths = files.some(isFolderUpload);
+  const deferredKnowledgeIds: string[] = [];
 
   for (const file of files) {
     try {
@@ -1672,7 +1675,13 @@ const executeUploadBatch = async (
         tag_ids?: string[]
         fileName?: string
         process_config?: KnowledgeProcessOverrides
+        defer_processing?: boolean
+        store_only?: boolean
       } = { file, tag_ids: tagIdsToUpload };
+      if (isFolderUpload(file)) {
+        uploadData.defer_processing = true;
+        uploadData.store_only = !supportedFileTypes.value.has(getUploadFileExt(file));
+      }
 
       const fileName = getFolderUploadFileName(file, options.targetFolder || ROOT_FOLDER_PATH);
       if (fileName) uploadData.fileName = fileName;
@@ -1684,6 +1693,10 @@ const executeUploadBatch = async (
       const isSuccess = responseData?.success || responseData?.code === 200 || responseData?.status === 'success' || (!responseData?.error && responseData);
       if (isSuccess) {
         successCount++;
+        const knowledgeId = responseData?.data?.id || responseData?.id;
+        if (uploadData.defer_processing && !uploadData.store_only && knowledgeId) {
+          deferredKnowledgeIds.push(knowledgeId);
+        }
       } else {
         failCount++;
         if (totalCount === 1) {
@@ -1708,6 +1721,16 @@ const executeUploadBatch = async (
         }
         MessagePlugin.error(errorMessage);
       }
+    }
+  }
+
+  if (hasFolderPaths && deferredKnowledgeIds.length > 0) {
+    try {
+      await finalizeFolderUpload(targetKbId, deferredKnowledgeIds);
+    } catch (error) {
+      // Files are safely registered as pending. A later retry can finalize
+      // them without losing their directory-relative references.
+      failCount += deferredKnowledgeIds.length;
     }
   }
 

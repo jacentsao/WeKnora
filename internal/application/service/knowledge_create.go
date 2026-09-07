@@ -21,10 +21,27 @@ import (
 	"github.com/hibiken/asynq"
 )
 
-// CreateKnowledgeFromFile creates a knowledge entry from an uploaded file
+// CreateKnowledgeFromFile creates a knowledge entry from an uploaded file.
+// The regular single-file path always starts processing immediately.
 func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	kbID string, file *multipart.FileHeader, metadata map[string]string, enableMultimodel *bool, customFileName string, tagIDs []string, channel string,
 	processOverrides *types.KnowledgeProcessOverrides,
+) (*types.Knowledge, error) {
+	return s.createKnowledgeFromFile(ctx, kbID, file, metadata, enableMultimodel, customFileName, tagIDs, channel, processOverrides, types.KnowledgeFileImportOptions{})
+}
+
+// CreateKnowledgeFromFileWithOptions is used by finalized folder uploads.
+// It keeps the existing interface method stable for every non-folder caller.
+func (s *knowledgeService) CreateKnowledgeFromFileWithOptions(ctx context.Context,
+	kbID string, file *multipart.FileHeader, metadata map[string]string, enableMultimodel *bool, customFileName string, tagIDs []string, channel string,
+	processOverrides *types.KnowledgeProcessOverrides, options types.KnowledgeFileImportOptions,
+) (*types.Knowledge, error) {
+	return s.createKnowledgeFromFile(ctx, kbID, file, metadata, enableMultimodel, customFileName, tagIDs, channel, processOverrides, options)
+}
+
+func (s *knowledgeService) createKnowledgeFromFile(ctx context.Context,
+	kbID string, file *multipart.FileHeader, metadata map[string]string, enableMultimodel *bool, customFileName string, tagIDs []string, channel string,
+	processOverrides *types.KnowledgeProcessOverrides, importOptions types.KnowledgeFileImportOptions,
 ) (*types.Knowledge, error) {
 	logger.Info(ctx, "Start creating knowledge from file")
 
@@ -71,7 +88,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	// gates the same extension set, but this path must keep returning
 	// ErrInvalidFileType rather than the shared gate's localized message.
 	logger.Infof(ctx, "Checking file type: %s", fileName)
-	if !isValidFileType(fileName) {
+	if !isValidFileType(fileName) && !importOptions.StoreOnly {
 		logger.Error(ctx, "Invalid file type")
 		return nil, ErrInvalidFileType
 	}
@@ -144,9 +161,12 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 		folderPath = types.NormalizeKnowledgeFolderPath(safeFolderPath)
 	}
 
-	eff, err := resolveFileImportProcessConfig(ctx, kb, getFileType(safeFilename), processOverrides, enableMultimodel)
-	if err != nil {
-		return nil, err
+	var eff types.EffectiveProcessConfig
+	if !importOptions.StoreOnly {
+		eff, err = resolveFileImportProcessConfig(ctx, kb, getFileType(safeFilename), processOverrides, enableMultimodel)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Prepare knowledge record
@@ -163,7 +183,7 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 		FileType:         getFileType(safeFilename),
 		FileSize:         file.Size,
 		FileHash:         hash,
-		ParseStatus:      "pending",
+		ParseStatus:      types.ParseStatusPending,
 		EnableStatus:     "disabled",
 		CreatedAt:        time.Now(),
 		UpdatedAt:        time.Now(),
@@ -201,6 +221,16 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 	if err := s.setAndAttachKnowledgeTags(ctx, tenantID, kbID, knowledge, tagIDs); err != nil {
 		logger.Errorf(ctx, "Failed to set knowledge tags, knowledge ID: %s, error: %v", knowledge.ID, err)
 		return nil, err
+	}
+	if importOptions.StoreOnly {
+		knowledge.ParseStatus = types.ParseStatusSkipped
+		if err := s.repo.UpdateKnowledgeColumn(ctx, knowledge.ID, "parse_status", knowledge.ParseStatus); err != nil {
+			return nil, err
+		}
+		return knowledge, nil
+	}
+	if importOptions.DeferProcessing {
+		return knowledge, nil
 	}
 
 	// Enqueue document processing task to Asynq
@@ -275,6 +305,29 @@ func (s *knowledgeService) CreateKnowledgeFromFile(ctx context.Context,
 
 	logger.Infof(ctx, "Knowledge from file created successfully, ID: %s", knowledge.ID)
 	return knowledge, nil
+}
+
+// FinalizeFolderUpload starts processing files that were registered with
+// DeferProcessing. Callers must supply only the successful IDs from one folder
+// upload; every ID is re-scoped to the tenant and knowledge base here.
+func (s *knowledgeService) FinalizeFolderUpload(ctx context.Context, kbID string, knowledgeIDs []string) (started, skipped int, err error) {
+	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
+	for _, id := range knowledgeIDs {
+		knowledge, getErr := s.repo.GetKnowledgeByID(ctx, tenantID, id)
+		if getErr != nil || knowledge == nil {
+			skipped++
+			continue
+		}
+		if knowledge.KnowledgeBaseID != kbID || knowledge.ParseStatus != types.ParseStatusPending {
+			skipped++
+			continue
+		}
+		if _, reparseErr := s.ReparseKnowledge(ctx, knowledge.ID, nil); reparseErr != nil {
+			return started, skipped, reparseErr
+		}
+		started++
+	}
+	return started, skipped, nil
 }
 
 // CreateKnowledgeFromURL creates a knowledge entry from a URL source

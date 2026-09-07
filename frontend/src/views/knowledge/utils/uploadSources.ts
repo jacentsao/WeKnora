@@ -62,7 +62,10 @@ export function filterUploadFiles(
       continue
     }
 
-    if (kbFileTypeVerification(file, multiFile, dynamicTypes)) {
+    // A directory may contain images, SVGs, archives, and configuration files
+    // referenced by a Markdown sibling. They are uploaded as store-only
+    // attachments later; individual-file uploads retain the parser whitelist.
+    if (!options.fromFolder && kbFileTypeVerification(file, multiFile, dynamicTypes)) {
       skippedCount++
       continue
     }
