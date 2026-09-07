@@ -2,6 +2,11 @@ import { kbFileTypeVerification } from '@/utils'
 
 export const UPLOAD_VIDEO_EXTENSIONS = ['mp4', 'mov', 'avi', 'mkv', 'webm', 'wmv', 'flv']
 
+// Keep this in sync with the server-side storeOnlyFileExtensions. These files
+// can be retained as directory-upload attachments for relative references;
+// arbitrary binaries and build artifacts must not be silently uploaded.
+export const STORE_ONLY_FILE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'yaml', 'yml', 'json', 'xml', 'pdf', 'txt', 'csv']
+
 export function getUploadFileExt(file: File): string {
   const dot = file.name.lastIndexOf('.')
   if (dot < 0) return ''
@@ -62,10 +67,11 @@ export function filterUploadFiles(
       continue
     }
 
-    // A directory may contain images, SVGs, archives, and configuration files
-    // referenced by a Markdown sibling. They are uploaded as store-only
-    // attachments later; individual-file uploads retain the parser whitelist.
-    if (!options.fromFolder && kbFileTypeVerification(file, multiFile, dynamicTypes)) {
+    // A directory may additionally contain a small set of safe attachment
+    // types referenced by a Markdown sibling. Other unsupported types remain
+    // rejected, just like individual-file uploads.
+    const isStoreOnlyAttachment = options.fromFolder && STORE_ONLY_FILE_EXTENSIONS.includes(fileExt)
+    if (!isStoreOnlyAttachment && kbFileTypeVerification(file, multiFile, dynamicTypes)) {
       skippedCount++
       continue
     }

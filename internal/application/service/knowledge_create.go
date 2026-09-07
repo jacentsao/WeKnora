@@ -92,6 +92,10 @@ func (s *knowledgeService) createKnowledgeFromFile(ctx context.Context,
 		logger.Error(ctx, "Invalid file type")
 		return nil, ErrInvalidFileType
 	}
+	if importOptions.StoreOnly && !isAllowedStoreOnlyFileType(fileName) {
+		logger.Error(ctx, "Invalid store-only file type")
+		return nil, ErrInvalidFileType
+	}
 
 	// Calculate file hash for deduplication
 	logger.Info(ctx, "Calculating file hash")
@@ -105,11 +109,12 @@ func (s *knowledgeService) createKnowledgeFromFile(ctx context.Context,
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 	logger.Infof(ctx, "Checking if file exists, tenant ID: %d", tenantID)
 	exists, existingKnowledge, err := s.repo.CheckKnowledgeExists(ctx, tenantID, kbID, &types.KnowledgeCheckParams{
-		Type:     "file",
-		FileName: fileName,
-		FileType: getFileType(fileName),
-		FileSize: file.Size,
-		FileHash: hash,
+		Type:       "file",
+		FileName:   fileName,
+		FolderPath: folderPath,
+		FileType:   getFileType(fileName),
+		FileSize:   file.Size,
+		FileHash:   hash,
 	})
 	if err != nil {
 		logger.Errorf(ctx, "Failed to check knowledge existence: %v", err)
@@ -308,8 +313,8 @@ func (s *knowledgeService) createKnowledgeFromFile(ctx context.Context,
 }
 
 // FinalizeFolderUpload starts processing files that were registered with
-// DeferProcessing. Callers must supply only the successful IDs from one folder
-// upload; every ID is re-scoped to the tenant and knowledge base here.
+// DeferProcessing. Every supplied ID is re-scoped to the tenant and knowledge
+// base here; callers may only start entries that are still pending.
 func (s *knowledgeService) FinalizeFolderUpload(ctx context.Context, kbID string, knowledgeIDs []string) (started, skipped int, err error) {
 	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
 	for _, id := range knowledgeIDs {

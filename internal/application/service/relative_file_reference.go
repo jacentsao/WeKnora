@@ -68,7 +68,12 @@ func (s *knowledgeService) RewriteRelativeMarkdownImages(ctx context.Context, te
 		} else if space := strings.IndexAny(target, " \t"); space >= 0 {
 			targetEnd = targetStart + space
 		}
-		if ref, resolved, err := s.ResolveRelativeFileReference(ctx, tenantID, kbID, folderPath, markdown[targetStart:targetEnd]); err == nil && resolved {
+		// Markdown permits a destination to escape parentheses. Resolve the
+		// logical filename, not its Markdown escaping, while replacing the whole
+		// destination with the canonical resource URL below.
+		referencePath := strings.ReplaceAll(markdown[targetStart:targetEnd], `\(`, "(")
+		referencePath = strings.ReplaceAll(referencePath, `\)`, ")")
+		if ref, resolved, err := s.ResolveRelativeFileReference(ctx, tenantID, kbID, folderPath, referencePath); err == nil && resolved {
 			replacements = append(replacements, replacement{targetStart, targetEnd, ref})
 		}
 		i = end

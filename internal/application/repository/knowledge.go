@@ -111,6 +111,7 @@ func (r *knowledgeRepository) FindKnowledgeByLogicalPath(
 	var knowledge types.Knowledge
 	err := r.db.WithContext(ctx).
 		Where("tenant_id = ? AND knowledge_base_id = ? AND folder_path = ? AND file_name = ?", tenantID, kbID, folderPath, fileName).
+		Order("created_at DESC, id DESC").
 		First(&knowledge).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -394,11 +395,11 @@ func (r *knowledgeRepository) CheckKnowledgeExists(
 		// .txt) available as separate knowledge items.
 		if params.FileHash != "" {
 			var knowledge types.Knowledge
-			duplicateQuery := query.Where("type = ? AND file_hash = ?", "file", params.FileHash)
+			duplicateQuery := query.Where("type = ? AND file_hash = ? AND folder_path = ? AND file_name = ?", "file", params.FileHash, params.FolderPath, params.FileName)
 			if params.FileType != "" {
 				duplicateQuery = duplicateQuery.Where("LOWER(file_type) = ?", strings.ToLower(params.FileType))
 			}
-			err := duplicateQuery.First(&knowledge).Error
+			err := duplicateQuery.Order("created_at DESC, id DESC").First(&knowledge).Error
 			if err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
 					return false, nil, nil
@@ -412,13 +413,13 @@ func (r *knowledgeRepository) CheckKnowledgeExists(
 		if params.FileName != "" && params.FileSize > 0 {
 			var knowledge types.Knowledge
 			duplicateQuery := query.Where(
-				"type = ? AND file_name = ? AND file_size = ?",
-				"file", params.FileName, params.FileSize,
+				"type = ? AND file_name = ? AND file_size = ? AND folder_path = ?",
+				"file", params.FileName, params.FileSize, params.FolderPath,
 			)
 			if params.FileType != "" {
 				duplicateQuery = duplicateQuery.Where("LOWER(file_type) = ?", strings.ToLower(params.FileType))
 			}
-			err := duplicateQuery.First(&knowledge).Error
+			err := duplicateQuery.Order("created_at DESC, id DESC").First(&knowledge).Error
 			if err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
 					return false, nil, nil
