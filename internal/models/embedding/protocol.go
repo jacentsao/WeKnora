@@ -16,9 +16,6 @@ import (
 	"github.com/Tencent/WeKnora/internal/types"
 )
 
-// retryPolicy is the transport-error retry budget; tests shorten it.
-var retryPolicy = api.DefaultRetryPolicy
-
 // newRemoteEmbedder resolves the catalog and returns the protocol client for
 // the configured model, wrapped in the shared batching layer. It mirrors
 // rerank.newReranker: the vendor's facts decide the protocol, the URL and the
@@ -68,7 +65,10 @@ func newRemoteEmbedder(config Config, pooler EmbedderPooler) (Embedder, error) {
 	if config.SupportsDimensionOverride {
 		dimensions = config.Dimensions
 	}
-	retry := retryPolicy()
+	retry, err := configureEmbeddingRetry(endpoint, config.ExtraConfig)
+	if err != nil {
+		return nil, err
+	}
 
 	var client api.Embedder
 	switch resolved.EmbeddingAPI {

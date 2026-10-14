@@ -732,6 +732,7 @@ func resolveModelMaxConcurrency(ss interfaces.SystemSettingService) int {
 // concurrency governor (chat + vlm) and installs it. Only available with Redis
 // (the shared semaphore backend); Lite mode uses registerLiteModelConcurrencyLimiter.
 func registerModelConcurrencyLimiter(rdb *redis.Client, ss interfaces.SystemSettingService) {
+	limiter.SetRequestLimiter(limiter.NewRedisRequestLimiter(rdb))
 	limit := resolveModelMaxConcurrency(ss)
 	limiter.SetGovernor(limiter.NewRedisLimiter(rdb), limit)
 	if limit <= 0 {
@@ -748,6 +749,7 @@ func registerModelConcurrencyLimiter(rdb *redis.Client, ss interfaces.SystemSett
 // semaphore is sufficient to keep a background ingestion storm from bursting
 // the whole worker pool against one provider.
 func registerLiteModelConcurrencyLimiter(ss interfaces.SystemSettingService) {
+	limiter.SetRequestLimiter(limiter.NewLocalRequestLimiter())
 	limit := resolveModelMaxConcurrency(ss)
 	limiter.SetGovernor(limiter.NewLocalLimiter(), limit)
 	if limit <= 0 {

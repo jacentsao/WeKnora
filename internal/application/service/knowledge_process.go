@@ -19,6 +19,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/infrastructure/chunker"
 	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
 	"github.com/Tencent/WeKnora/internal/logger"
+	"github.com/Tencent/WeKnora/internal/models/api"
 	"github.com/Tencent/WeKnora/internal/models/asr"
 	"github.com/Tencent/WeKnora/internal/models/chat"
 	"github.com/Tencent/WeKnora/internal/models/embedding"
@@ -741,8 +742,13 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 			// Embedding and vector-store errors are often transient. While the
 			// task has attempts left, leave the row processing and hand the
 			// error to the queue so the idempotent parse runs again; only the
-			// final attempt (or a caller without a retry loop) records failure.
+			// final attempt, permanent provider rejection, or a caller without
+			// a retry loop records failure.
 			willRetry := summaryTaskWillRetry(ctx)
+			var providerErr *api.HTTPError
+			if errors.As(err, &providerErr) && !providerErr.Retryable() {
+				willRetry = false
+			}
 			if !willRetry {
 				knowledge.ParseStatus = types.ParseStatusFailed
 				knowledge.ErrorMessage = err.Error()

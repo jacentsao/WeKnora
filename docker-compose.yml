@@ -273,6 +273,10 @@ services:
       - OLLAMA_OPTIONAL=${OLLAMA_OPTIONAL:-true}
       # 批量 embedding 大小
       - BATCH_EMBED_SIZE=${BATCH_EMBED_SIZE:-}
+      - EMBED_REQUEST_INTERVAL_MS=${EMBED_REQUEST_INTERVAL_MS:-0}
+      - EMBED_RETRY_ATTEMPTS=${EMBED_RETRY_ATTEMPTS:-6}
+      - EMBED_RETRY_BASE_DELAY_MS=${EMBED_RETRY_BASE_DELAY_MS:-5000}
+      - EMBED_RETRY_MAX_DELAY_MS=${EMBED_RETRY_MAX_DELAY_MS:-60000}
       # VLM 单次 HTTP 请求超时（秒，默认 180）
       - VLM_HTTP_TIMEOUT_SECONDS=${VLM_HTTP_TIMEOUT_SECONDS:-}
       # LLM 流原始转储（排查上下文问题；1 启用，默认目录 ~/.weknora/investigate/llm-stream）

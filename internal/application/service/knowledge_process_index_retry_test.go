@@ -3,8 +3,11 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
 	"testing"
 
+	"github.com/Tencent/WeKnora/internal/models/api"
 	"github.com/Tencent/WeKnora/internal/models/embedding"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/stretchr/testify/require"
@@ -48,7 +51,7 @@ func (e *failingIndexEngine) DeleteByKnowledgeIDList(context.Context, []string, 
 }
 
 func runProcessChunksWithFailingIndex(
-	ctx context.Context, t *testing.T,
+	ctx context.Context, t *testing.T, cause ...error,
 ) (*indexRetryKnowledgeRepo, *indexRetryChunkRepo, *failingIndexEngine, error) {
 	t.Helper()
 	knowledge := &types.Knowledge{
@@ -60,6 +63,9 @@ func runProcessChunksWithFailingIndex(
 	repo := &indexRetryKnowledgeRepo{parentChildKnowledgeRepo: parentChildKnowledgeRepo{knowledge: knowledge}}
 	chunks := &indexRetryChunkRepo{}
 	engine := &failingIndexEngine{err: errors.New("embedding endpoint unavailable")}
+	if len(cause) > 0 {
+		engine.err = cause[0]
+	}
 	tenant := &types.Tenant{
 		ID: 1,
 		RetrieverEngines: types.RetrieverEngines{Engines: []types.RetrieverEngineParams{{
@@ -118,4 +124,19 @@ func TestProcessChunksFailsKnowledgeOnLastBatchIndexAttempt(t *testing.T) {
 	require.Equal(t, "embedding endpoint unavailable", last.ErrorMessage)
 	require.Equal(t, 2, chunks.deletes)
 	require.Equal(t, 2, engine.indexDeletes)
+}
+
+func TestProcessChunksDoesNotRequeuePermanentProviderRejections(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			ctx := types.WithTaskRetryMetadata(context.Background(), 0, 3)
+			cause := fmt.Errorf("embedding: %w", &api.HTTPError{StatusCode: status, Body: "provider rejected request"})
+			repo, _, _, err := runProcessChunksWithFailingIndex(ctx, t, cause)
+			require.NoError(t, err, "the queue must acknowledge a permanent failure")
+			require.NotEmpty(t, repo.updates)
+			last := repo.updates[len(repo.updates)-1]
+			require.Equal(t, types.ParseStatusFailed, last.ParseStatus)
+			require.Equal(t, cause.Error(), last.ErrorMessage)
+		})
+	}
 }

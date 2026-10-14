@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -189,7 +190,7 @@ func (e Endpoint) roundTrip(req *http.Request, out any) error {
 
 // TransportError is a request that never got a whole answer: DNS, connect,
 // TLS, a reset or a timeout, while sending or while reading the reply. It is
-// the only failure worth sending again.
+// retryable without opting into HTTP-status retries.
 type TransportError struct {
 	// Op is the phase that failed: "send request" or "read response".
 	Op  string
@@ -212,6 +213,22 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("API request failed with status %d: %s", e.StatusCode, e.Body)
 }
 
+// Retryable reports transient HTTP statuses supported by the model retry
+// policy. Permanent provider rejections must not be retried by a document queue
+// after the request layer has already returned them.
+func (e *HTTPError) Retryable() bool {
+	if e == nil {
+		return false
+	}
+	switch e.StatusCode {
+	case http.StatusTooManyRequests, http.StatusInternalServerError,
+		http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
 // RetryAfter is how long the vendor asked the caller to wait before trying
 // again, from the Retry-After header in either of its two forms (delay in
 // seconds or an HTTP date). It is zero when the header is absent, malformed
@@ -231,6 +248,9 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 	if secs, err := strconv.Atoi(value); err == nil {
 		if secs <= 0 {
 			return 0
+		}
+		if int64(secs) > math.MaxInt64/int64(time.Second) {
+			return time.Duration(math.MaxInt64)
 		}
 		return time.Duration(secs) * time.Second
 	}

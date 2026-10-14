@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -170,4 +172,70 @@ func TestReadFailureIsReportedAsSuch(t *testing.T) {
 	var transportErr *TransportError
 	require.ErrorAs(t, err, &transportErr)
 	assert.Equal(t, "read response", transportErr.Op)
+}
+
+func TestHTTPRetryPolicyHonoursRetryAfterBeforeCancellation(t *testing.T) {
+	t.Setenv("SSRF_WHITELIST", "127.0.0.1")
+	for _, hint := range []string{"60", time.Now().Add(time.Minute).UTC().Format(http.TimeFormat)} {
+		t.Run(hint, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				w.Header().Set("Retry-After", hint)
+				w.WriteHeader(http.StatusTooManyRequests)
+			}))
+			defer server.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+			defer cancel()
+			err := (Endpoint{}).PostJSONWithRetry(ctx, server.URL, map[string]any{}, nil, RetryPolicy{
+				MaxRetries: 2, RetryHTTP: true, Jitter: true, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond,
+			}, "embedding")
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+			require.Equal(t, 1, calls, "the backoff cap and jitter must not shorten the provider minimum")
+		})
+	}
+}
+
+func TestHTTPRetryPolicyClassifiesFailures(t *testing.T) {
+	for _, status := range []int{400, 401, 403, 404, 429, 500, 501, 502, 503, 504} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			calls, admissions, failures := 0, 0, 0
+			policy := RetryPolicy{
+				MaxRetries: 2, RetryHTTP: true,
+				BeforeAttempt: func(context.Context) error { admissions++; return nil },
+				OnFailure:     func(context.Context, error, time.Duration) error { failures++; return nil },
+			}
+			err := withRetry(context.Background(), policy, "embedding", func() error {
+				calls++
+				return &HTTPError{StatusCode: status}
+			})
+			var upstream *HTTPError
+			require.ErrorAs(t, err, &upstream)
+			if status == 429 || status == 500 || status == 502 || status == 503 || status == 504 {
+				require.Equal(t, 3, calls)
+				require.Equal(t, calls, failures, "even the final 429 must cool down other callers")
+			} else {
+				require.Equal(t, 1, calls)
+				require.Zero(t, failures)
+			}
+			require.Equal(t, calls, admissions, "each retry must reacquire quota")
+		})
+	}
+}
+
+func TestRetryAdmissionFailureDoesNotSend(t *testing.T) {
+	blocked := errors.New("quota backend unavailable")
+	err := withRetry(context.Background(), RetryPolicy{
+		MaxRetries: 3, RetryHTTP: true,
+		BeforeAttempt: func(context.Context) error { return blocked },
+	}, "embedding", func() error { t.Fatal("request sent without quota"); return nil })
+	require.ErrorIs(t, err, blocked)
+}
+
+func TestRetryDelayCannotOverflow(t *testing.T) {
+	p := RetryPolicy{BaseDelay: time.Hour, MaxDelay: 2 * time.Hour}
+	require.Equal(t, 2*time.Hour, p.delay(1000))
+	p.MaxDelay = 0
+	require.Equal(t, time.Duration(math.MaxInt64), p.delay(1000))
+	require.Equal(t, time.Duration(math.MaxInt64), parseRetryAfter("9223372036854775807", time.Now()))
 }

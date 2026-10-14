@@ -663,6 +663,51 @@ return wrapChatConcurrency(c, config.MaxConcurrency, err)
 - 限额优先取模型自身 `parameters.max_concurrency`，为 0 时回落进程级默认 `model.max_concurrency`（可经系统设置在运行时通过 `SetGlobalLimit` 热更新）。
 - 运行时观测：`GET /system/admin/runtime/queues`（`internal/handler/system.go`）返回 `limiter.RuntimeStats()` 的每模型 `active / waiting / limit`（Redis 后端 active 为集群级，waiting 为进程本地）。
 
+### 批量入库的 Embedding 限流与重试
+
+远端 Embedding 对每个实际 HTTP 请求独立重试传输错误、429 和 500/502/503/504。
+已成功的子批次会在当前调用中保留，其他子批次失败不会触发索引层重新发送整个文档。
+400/401/403 等永久拒绝直接返回，文档解析任务也不会因为这些 HTTP 错误继续自动重跑。
+重试遵守 `Retry-After`（秒数或 HTTP 日期），没有提示时使用带随机抖动的指数退避。
+
+后台并发上限只限制同时在途的调用数，不能保证满足厂商的 RPS/RPM。
+需要主动控制请求频率时，在 `.env` 设置以下选项后重启应用：
+
+| 配置 | 默认值 | 作用 |
+| --- | --- | --- |
+| `BATCH_EMBED_SIZE` | `5` | 每个工作批次的输入条数，必须为正，协议还会按模型上限拆分 |
+| `EMBED_REQUEST_INTERVAL_MS` | `0` | 同一配额范围中每个 HTTP 请求的最小间隔；0 表示平时不主动限速，范围 0–3600000 毫秒 |
+| `EMBED_RETRY_ATTEMPTS` | `6` | 每个 HTTP 请求的总尝试次数，含首次，范围 1–32 |
+| `EMBED_RETRY_BASE_DELAY_MS` | `5000` | 指数退避基数，范围 1–3600000 毫秒 |
+| `EMBED_RETRY_MAX_DELAY_MS` | `60000` | 计算退避上限，范围 1–3600000 毫秒；不能缩短厂商的 `Retry-After` |
+
+退避会从计算等待时间的后半区间随机取值。重试次数或退避配置无效时使用默认值；请求间隔无效时模型初始化报错。
+例如 `EMBED_REQUEST_INTERVAL_MS=1000` 平滑限制为约每秒一个请求；应按真实账户配额设置，并为其他应用的流量留余量。
+这是请求频率控制，**不计算 TPM**。在模型输入条数和 token 上限允许时，增大 batch 能减少请求次数。
+
+默认配额范围按端点 host（含端口）和实际发送的模型名划分。多个文档、模型记录、API key、协议拆分和重试共同计数；
+查询向量也经过同一请求调度，因为它们消耗相同的供应商额度。Redis 模式跨应用实例共享状态，Lite 模式在同一进程中共享。
+收到 429 后，所有相同范围的调用共享冷却时间；如果没有配置请求间隔，冷却结束后的一分钟先按每秒一个请求恢复，避免同时重试。
+Redis 请求限速后端故障时返回错误，防止后台积压任务全部放行；这与上面的后台并发闸门故障时放行的策略不同。
+
+不同账户默认也可能被保守地合并；同账户跨域名/模型别名则可能需要显式合并。
+可通过模型 API 或内置模型 YAML 的 `parameters.extra_config` 配置以下字符串字段（不是 `spec.compat`）：
+
+```json
+{
+  "embedding_request_interval_ms": "1000",
+  "embedding_rate_limit_scope": "provider-account-region-model-quota"
+}
+```
+
+`embedding_request_interval_ms` 覆盖全局间隔；`embedding_rate_limit_scope` 指定完整共享配额范围。
+同一配额范围的模型应使用一致的间隔。这个范围名称不需要包含密钥；仅其摘要用于 Redis key。
+摘要、生成问题和图片向量使用相同远端 Embedding 路径，也会计入对应配额。
+
+当前成功向量仅保留在一次调用内，未引入跨任务或进程重启后的持久断点续传。
+请求重试耗尽后，原有文档任务队列仍可按预算重跑；文档全部向量生成成功后才开始索引写入。
+本地 Ollama 不使用上述远端 HTTP 重试和请求限速。
+
 ### rerank_server_demo.py 的用途
 
 仓库根目录的 `rerank_server_demo.py` 是一个**自托管 Rerank 服务的最小参考实现**：FastAPI + HuggingFace `AutoModelForSequenceClassification`，暴露 `POST /rerank`，请求体 `{query, documents}`，返回 `{"results": [{index, document: {text}, score}]}`。

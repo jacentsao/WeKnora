@@ -55,9 +55,10 @@ func TestUnreachableUpstreamIsAnErrorForEveryProtocol(t *testing.T) {
 // A signing vendor without its identity pair would send unsigned requests
 // and fail at the far end with a less useful error.
 func TestSignedVendorNeedsItsIdentityPair(t *testing.T) {
+	allowLoopback(t)
 	_, err := newEmbedder(Config{
 		Source: types.ModelSourceRemote, Provider: "weknoracloud",
-		BaseURL: "https://weknora.weixin.qq.com", ModelName: "m", AppSecret: "s",
+		BaseURL: "http://127.0.0.1", ModelName: "m", AppSecret: "s",
 	}, nil, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "AppID is required")

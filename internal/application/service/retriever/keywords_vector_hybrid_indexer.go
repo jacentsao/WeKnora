@@ -6,7 +6,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -23,13 +22,6 @@ import (
 // model-specific way. Set well above any current chunkSize budget so it only
 // kicks in for genuinely pathological inputs.
 const safetyMaxChars = 20000
-
-// embedRetryAttempts and embedRetryBaseDelay control the exponential backoff
-// applied to BatchEmbedWithPool calls.
-const (
-	embedRetryAttempts  = 5
-	embedRetryBaseDelay = 200 * time.Millisecond
-)
 
 var embeddingImagePayloadPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?is)<img\b[^>]*\bsrc=["']\s*data:image/[a-z0-9.+-]+;base64,[^"']+["'][^>]*>`),
@@ -97,7 +89,9 @@ func (v *KeywordsVectorHybridRetrieveEngineService) BatchIndex(ctx context.Conte
 		for _, indexInfo := range indexInfoList {
 			contentList = append(contentList, sanitizeForEmbedding(ctx, indexInfo.Content))
 		}
-		embeddings, err := batchEmbedWithBackoff(ctx, embedder, contentList)
+		// The provider retries the failed HTTP request in place. Replaying this
+		// entire list would discard successful batches and multiply rate limits.
+		embeddings, err := embedder.BatchEmbedWithPool(ctx, embedder, contentList)
 		if err != nil {
 			return err
 		}
@@ -124,33 +118,6 @@ func (v *KeywordsVectorHybridRetrieveEngineService) BatchIndex(ctx context.Conte
 		return v.concurrentBatchSaveNoEmbedding(ctx, chunks)
 	}
 	return v.boundedConcurrentBatchSaveNoEmbedding(ctx, chunks, maxConcurrency)
-}
-
-// batchEmbedWithBackoff calls BatchEmbedWithPool with exponential backoff on
-// transient failures (200 / 400 / 800 / 1600 / 3200 ms). It returns the last
-// embedding result on success or the last error if every attempt failed.
-func batchEmbedWithBackoff(ctx context.Context, embedder embedding.Embedder, contentList []string) ([][]float32, error) {
-	delay := embedRetryBaseDelay
-	var (
-		embeddings [][]float32
-		err        error
-	)
-	for attempt := 0; attempt < embedRetryAttempts; attempt++ {
-		embeddings, err = embedder.BatchEmbedWithPool(ctx, embedder, contentList)
-		if err == nil {
-			return embeddings, nil
-		}
-		logger.Errorf(ctx, "BatchEmbedWithPool attempt %d/%d failed: %v", attempt+1, embedRetryAttempts, err)
-		if attempt+1 < embedRetryAttempts {
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-			delay *= 2
-		}
-	}
-	return embeddings, err
 }
 
 // sanitizeForEmbedding caps content length at safetyMaxChars characters so

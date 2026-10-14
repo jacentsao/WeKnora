@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"math/rand/v2"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -18,6 +20,18 @@ type RetryPolicy struct {
 	BaseDelay time.Duration
 	// MaxDelay caps the backoff.
 	MaxDelay time.Duration
+	// RetryHTTP opts into retrying 429 and transient server errors. Other
+	// clients retain their transport-only policy unless they explicitly opt in.
+	RetryHTTP bool
+	// Jitter spreads concurrent retries over the upper half of the backoff.
+	Jitter bool
+	// BeforeAttempt admits each actual request, including retries and protocol
+	// sub-batches, against a shared rate budget. Waiting is outside the HTTP
+	// client's per-request timeout but remains bounded by ctx.
+	BeforeAttempt func(context.Context) error
+	// OnFailure observes every retryable failure, including the final attempt.
+	// Embedding uses this to share a provider cooldown with other callers.
+	OnFailure func(context.Context, error, time.Duration) error
 }
 
 // DefaultRetryPolicy is three retries with 1s, 2s, 4s backoff, which is what
@@ -30,9 +44,16 @@ func (p RetryPolicy) delay(attempt int) time.Duration {
 	if p.BaseDelay <= 0 {
 		return 0
 	}
-	wait := p.BaseDelay << uint(attempt-1)
-	if p.MaxDelay > 0 && wait > p.MaxDelay {
-		return p.MaxDelay
+	ceiling := time.Duration(math.MaxInt64)
+	if p.MaxDelay > 0 {
+		ceiling = p.MaxDelay
+	}
+	wait := min(p.BaseDelay, ceiling)
+	for i := 1; i < attempt; i++ {
+		if wait > ceiling/2 {
+			return ceiling
+		}
+		wait *= 2
 	}
 	return wait
 }
@@ -49,11 +70,9 @@ func (p RetryPolicy) delay(attempt int) time.Duration {
 // Here the last error is captured in the enclosing scope on purpose and the
 // function cannot fall through without it.
 //
-// Only transport failures are retried, including a reply cut off while it
-// was being read. A non-2xx reply is the vendor answering, and repeating a
-// rejected request neither fixes it nor tells the operator anything new; a
-// reply that arrived whole but does not decode is the same answer every time,
-// and sending it again would bill the request twice.
+// Transport failures, including a reply cut off while reading, are retried.
+// RetryHTTP additionally permits rate limits and transient server errors;
+// permanent rejections and complete but undecodable replies are never retried.
 func (e Endpoint) PostJSONWithRetry(
 	ctx context.Context, url string, body, out any, policy RetryPolicy, label string,
 ) error {
@@ -62,14 +81,16 @@ func (e Endpoint) PostJSONWithRetry(
 	})
 }
 
-// withRetry runs send until it succeeds, fails with anything other than a
-// TransportError, or the budget runs out. The last error lives in the
-// enclosing scope and the loop cannot fall through without it.
+// withRetry owns the request retry budget. Synchronous callers must not wrap
+// it in another retry loop that replays successful batches of a document.
 func withRetry(ctx context.Context, policy RetryPolicy, label string, send func() error) error {
 	var lastErr error
-	for attempt := 0; attempt <= policy.MaxRetries; attempt++ {
+	var wait time.Duration
+	for attempt := 0; attempt <= max(0, policy.MaxRetries); attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if attempt > 0 {
-			wait := policy.delay(attempt)
 			logger.Infof(ctx, "[%s] retrying (%d/%d) after %v: %v",
 				label, attempt, policy.MaxRetries, wait, lastErr)
 			select {
@@ -78,15 +99,52 @@ func withRetry(ctx context.Context, policy RetryPolicy, label string, send func(
 				return ctx.Err()
 			}
 		}
+		if policy.BeforeAttempt != nil {
+			if err := policy.BeforeAttempt(ctx); err != nil {
+				return err
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		err := send()
 		if err == nil {
 			return nil
 		}
-		var transportErr *TransportError
-		if !errors.As(err, &transportErr) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !policy.retryable(err) {
 			return err
 		}
 		lastErr = err
+		wait = policy.delay(attempt + 1)
+		if policy.Jitter && wait > 0 {
+			wait = wait/2 + time.Duration(rand.Int64N(int64(wait-wait/2)+1))
+		}
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) {
+			// A server minimum is applied AFTER the cap and jitter; neither
+			// may shorten Retry-After, including an HTTP-date value.
+			wait = max(wait, httpErr.RetryAfter())
+		}
+		if policy.OnFailure != nil {
+			if observeErr := policy.OnFailure(ctx, err, wait); observeErr != nil {
+				return errors.Join(err, observeErr)
+			}
+		}
 	}
 	return fmt.Errorf("%s: %w", label, lastErr)
+}
+
+func (p RetryPolicy) retryable(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	var transportErr *TransportError
+	if errors.As(err, &transportErr) {
+		return true
+	}
+	var httpErr *HTTPError
+	return p.RetryHTTP && errors.As(err, &httpErr) && httpErr.Retryable()
 }
