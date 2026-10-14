@@ -685,6 +685,17 @@ return wrapChatConcurrency(c, config.MaxConcurrency, err)
 例如 `EMBED_REQUEST_INTERVAL_MS=1000` 平滑限制为约每秒一个请求；应按真实账户配额设置，并为其他应用的流量留余量。
 这是请求频率控制，**不计算 TPM**。在模型输入条数和 token 上限允许时，增大 batch 能减少请求次数。
 
+默认间隔 `0` 保留原有吞吐能力，**不会防止首次批量上传的并发冲击**；共享冷却要等到收到 429 才生效。
+生产批量导入应先核对供应商账户/模型/区域的配额，再主动设置间隔。例如以下配置约每秒一个请求，
+仅适用于该速率符合实际配额的部署，并非所有模型的推荐值：
+
+```dotenv
+EMBED_REQUEST_INTERVAL_MS=1000
+EMBED_RETRY_ATTEMPTS=6
+EMBED_RETRY_BASE_DELAY_MS=5000
+EMBED_RETRY_MAX_DELAY_MS=60000
+```
+
 默认配额范围按端点 host（含端口）和实际发送的模型名划分。多个文档、模型记录、API key、协议拆分和重试共同计数；
 查询向量也经过同一请求调度，因为它们消耗相同的供应商额度。Redis 模式跨应用实例共享状态，Lite 模式在同一进程中共享。
 收到 429 后，所有相同范围的调用共享冷却时间；如果没有配置请求间隔，冷却结束后的一分钟先按每秒一个请求恢复，避免同时重试。
@@ -702,11 +713,32 @@ Redis 请求限速后端故障时返回错误，防止后台积压任务全部�
 
 `embedding_request_interval_ms` 覆盖全局间隔；`embedding_rate_limit_scope` 指定完整共享配额范围。
 同一配额范围的模型应使用一致的间隔。这个范围名称不需要包含密钥；仅其摘要用于 Redis key。
+如果供应商按账户合并不同模型或多个 API 端点的额度，这些模型配置必须填写同一个 Scope；
+如果不同账户的额度彼此独立，应填写不同的 Scope，以免同 host、同模型的默认分组互相限速。
 摘要、生成问题和图片向量使用相同远端 Embedding 路径，也会计入对应配额。
 
 当前成功向量仅保留在一次调用内，未引入跨任务或进程重启后的持久断点续传。
 请求重试耗尽后，原有文档任务队列仍可按预算重跑；文档全部向量生成成功后才开始索引写入。
+例如一个文档有 100 个子批次，第 81 批持续 429：当前调用不会重发前 80 批；但如果请求重试耗尽，
+队列再次投递整份文档时，前 80 批仍会重新计算。最后一次任务尝试失败才将文档标记为失败。
+这保留了队列对临时故障的容错能力，并不保证跨任务重试去重。
+
+供应商的 `Retry-After` 可以超过退避上限，等待仍受任务 context 的取消和截止时间约束。
+超时/取消会中止退避和配额等待，并等待已提交的批处理回调退出，释放工作池容量；不会为了任务即将超时而提前重发请求。
+同配额下其他未取消的任务仍须遵守共享冷却，任务重跑也不会清除该冷却。
 本地 Ollama 不使用上述远端 HTTP 重试和请求限速。
+
+对应边界测试可用以下命令复现（本地模拟供应商响应，不消耗真实模型配额）：
+
+```bash
+go test -race ./internal/models/embedding -run '^TestEmbeddingQueue' -count=1 -v
+go test -race ./internal/application/service -run '^TestProcessChunksQueueRetryReplaysSuccessfulEmbeddingBatches$' -count=1
+```
+
+默认使用临时 Redis 模拟服务；第一个命令通过两个独立 worker 进程和真实 HTTP 请求验证 100 份文档的共享限速，
+同时覆盖不同端点/模型的显式 Scope，以及长冷却下的队列超时和批量取消。
+设置 `WEKNORA_EMBEDDING_TEST_REDIS_ADDR` 可将第一个命令改为使用真实 Redis；必须指向隔离的测试实例，测试会写入合成队列任务。
+这些测试验证调度边界，不代表特定供应商配额下的生产吞吐验收。
 
 ### rerank_server_demo.py 的用途
 
